@@ -15,6 +15,7 @@
 package requester
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -65,6 +66,14 @@ type report struct {
 
 func newReport(w io.Writer, results chan *result, output string, n int) *report {
 	cap := min(n, maxRes)
+	// If CSV output is requested, wrap writer with a buffered writer and emit header immediately.
+	if output == "csv" {
+		bw := bufio.NewWriter(w)
+		// Print CSV header now so consumers see it right away.
+		fmt.Fprintln(bw, "response-time,DNS+dialup,DNS,Request-write,Response-delay,Response-read,status-code,offset")
+		bw.Flush()
+		w = bw
+	}
 	return &report{
 		output:      output,
 		results:     results,
@@ -107,6 +116,22 @@ func runReporter(r *report) {
 			if res.contentLength > 0 {
 				r.sizeTotal += res.contentLength
 			}
+			// Stream CSV line in real time when CSV output is selected.
+			if r.output == "csv" {
+				fmt.Fprintf(r.w, "%4.4f,%4.4f,%4.4f,%4.4f,%4.4f,%4.4f,%d,%4.4f\n",
+					res.duration.Seconds(),
+					res.connDuration.Seconds(),
+					res.dnsDuration.Seconds(),
+					res.reqDuration.Seconds(),
+					res.delayDuration.Seconds(),
+					res.resDuration.Seconds(),
+					res.statusCode,
+					res.offset.Seconds(),
+				)
+				if f, ok := r.w.(interface{ Flush() error }); ok {
+					_ = f.Flush()
+				}
+			}
 		}
 	}
 	// Signal reporter is done.
@@ -115,6 +140,13 @@ func runReporter(r *report) {
 
 func (r *report) finalize(total time.Duration) {
 	r.total = total
+	if r.output == "csv" {
+		// Final flush for CSV streaming mode and return without template rendering.
+		if f, ok := r.w.(interface{ Flush() error }); ok {
+			_ = f.Flush()
+		}
+		return
+	}
 	r.rps = float64(r.numRes) / r.total.Seconds()
 	r.average = r.avgTotal / float64(len(r.lats))
 	r.avgConn = r.avgConn / float64(len(r.lats))
